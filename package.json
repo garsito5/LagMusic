@@ -1,18 +1,22 @@
 {
-  "name": "sirgiomusicbot",
+  "name": "sirgio-music-bot",
   "version": "1.0.0",
-  "description": "SirgioMusicBOT - bot de música para Discord (todo en index.js)",
+  "description": "Sistema musical avanzado de SirgioMusicBOT con discord-player v6",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "echo \"No test specified\" && exit 0"
   },
-  "author": "Gars",
+  "author": "SirgioBOT Dev Team",
   "license": "MIT",
   "dependencies": {
-    "@discordjs/voice": "^0.16.0",
-    "discord-player": "^5.6.0",
-    "discord.js": "^14.11.0",
-    "play-dl": "^1.9.0",
-    "dotenv": "^16.0.0"
+    "discord.js": "^14.16.3",
+    "@discordjs/voice": "^1.3.0",
+    "discord-player": "^6.6.8",
+    "@discord-player/extractor": "^6.6.8",
+    "ffmpeg-static": "^5.2.0",
+    "libsodium-wrappers": "^0.7.13",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1"
   }
 }
