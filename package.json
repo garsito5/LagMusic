@@ -1,14 +1,8 @@
 {
   "name": "sirgio-music-bot",
   "version": "1.0.0",
-  "description": "Sistema musical avanzado de SirgioMusicBOT con discord-player v6",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "test": "echo \"No test specified\" && exit 0"
-  },
-  "author": "SirgioBOT Dev Team",
-  "license": "MIT",
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "discord.js": "^14.16.3",
     "@discordjs/voice": "^1.3.0",
