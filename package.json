@@ -1,0 +1,18 @@
+{
+  "name": "sirgiomusicbot",
+  "version": "1.0.0",
+  "description": "SirgioMusicBOT - bot de música para Discord (todo en index.js)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "Gars",
+  "license": "MIT",
+  "dependencies": {
+    "@discordjs/voice": "^0.16.0",
+    "discord-player": "^5.6.0",
+    "discord.js": "^14.11.0",
+    "play-dl": "^1.9.0",
+    "dotenv": "^16.0.0"
+  }
+}
