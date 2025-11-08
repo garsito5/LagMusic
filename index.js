@@ -1,117 +1,142 @@
-// index.js - SirgioMusicBOT (todo en un solo archivo)
-// Requisitos: .env con BOT_TOKEN, CLIENT_ID, (opcional) GUILD_ID
-// npm install según package.json
+/**
+ * index.js - SirgioMusicBOT (único archivo)
+ *
+ * Requisitos:
+ * - .env con BOT_TOKEN, CLIENT_ID, GUILD_ID (GUILD_ID = 1212886282645147768)
+ * - package.json con dependencias correctas (discord-player v6.7.1, @discord-player/extractor ^4.5.0, discord.js, @discordjs/voice, ffmpeg-static, dotenv, express, libsodium-wrappers)
+ *
+ * Nota: karaoke -> busca "query + karaoke" en la plataforma (la opción que elegiste).
+ */
 
 require('dotenv').config();
+const express = require('express');
+const http = require('http');
+
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const { Player, QueryType } = require('discord-player');
 const play = require('play-dl');
 
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID || null;
+const GUILD_ID = process.env.GUILD_ID || '1212886282645147768';
 
-if (!TOKEN || !CLIENT_ID) {
-  console.error('Falta BOT_TOKEN o CLIENT_ID en .env');
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error('Faltan variables en .env (BOT_TOKEN, CLIENT_ID, GUILD_ID)');
   process.exit(1);
 }
 
 /* -----------------------------
-   Definición de comandos (registro)
+   Configuración: IDs permitidos
    ----------------------------- */
-const commands = [
+// Canales de texto permitidos donde también se puede usar comandos (además de requerir estar en VC para la mayoría)
+const EXTRA_ALLOWED_TEXT_CHANNELS = new Set([
+  '1222966360263626865',
+  '1422809286417059850'
+]);
+
+/* -----------------------------
+   Comandos a registrar (guild-local)
+   ----------------------------- */
+const rawCommands = [
   new SlashCommandBuilder().setName('play').setDescription('Reproducir canción o playlist')
     .addSubcommand(sc => sc.setName('song').setDescription('Reproducir una canción (nombre o url)').addStringOption(o => o.setName('query').setDescription('Nombre o URL').setRequired(true)))
-    .addSubcommand(sc => sc.setName('playlist').setDescription('Reproducir una playlist').addStringOption(o => o.setName('service').setDescription('Servicio (youtube/spotify/soundcloud)').setRequired(true)).addStringOption(o => o.setName('playlist_name').setDescription('Nombre o URL de la playlist').setRequired(true))),
+    .addSubcommand(sc => sc.setName('playlist').setDescription('Reproducir una playlist (service + name/url)').addStringOption(o => o.setName('service').setDescription('Servicio (youtube/spotify/soundcloud)').setRequired(true)).addStringOption(o => o.setName('playlist_name').setDescription('Nombre o URL de la playlist').setRequired(true))),
   new SlashCommandBuilder().setName('skip').setDescription('Saltar la canción actual (owner o permitido)'),
   new SlashCommandBuilder().setName('pause').setDescription('Pausar reproducción'),
   new SlashCommandBuilder().setName('resume').setDescription('Reanudar reproducción'),
   new SlashCommandBuilder().setName('bucle').setDescription('Alternar bucle en la canción actual'),
-  new SlashCommandBuilder().setName('any').setDescription('Reproducir cualquier canción de la cola (será la siguiente)'),
-  new SlashCommandBuilder().setName('random').setDescription('Mezclar la cola'),
-  new SlashCommandBuilder().setName('vote').setDescription('Sistema de votación').addSubcommand(sc => sc.setName('skip').setDescription('Votar para saltar la canción actual')),
+  new SlashCommandBuilder().setName('any').setDescription('Reproducir cualquier Song de la cola (será la siguiente)'),
+  new SlashCommandBuilder().setName('random').setDescription('Mezclar (shuffle) la cola'),
+  new SlashCommandBuilder().setName('vote').setDescription('Sistema de votación')
+    .addSubcommand(sc => sc.setName('skip').setDescription('Votar para saltar la canción actual')),
   new SlashCommandBuilder().setName('addpermiss').setDescription('El creador da permisos a otro usuario').addUserOption(o => o.setName('user').setDescription('Usuario a dar permisos').setRequired(true)),
-  new SlashCommandBuilder().setName('clear').setDescription('Limpiar las siguientes canciones (solo creator)'),
-  new SlashCommandBuilder().setName('karaoke').setDescription('Reproducir versión karaoke (instrumental)').addStringOption(o => o.setName('query').setDescription('Nombre o URL').setRequired(true)),
-].map(cmd => cmd.toJSON());
+  new SlashCommandBuilder().setName('clear').setDescription('Limpiar las siguientes Songs de la cola (solo creator)'),
+  new SlashCommandBuilder().setName('karaoke').setDescription('Buscar y reproducir versión karaoke (instrumental)').addStringOption(o => o.setName('query').setDescription('Nombre o URL').setRequired(true)),
+  new SlashCommandBuilder().setName('help').setDescription('Mostrar todos los comandos (embed)'),
+].map(c => c.toJSON());
 
 /* -----------------------------
-   Cliente y player
+   Cliente Discord + Player
    ----------------------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages
-  ]
+  ],
 });
 
 const player = new Player(client, {
-  ytdlOptions: { quality: 'highestaudio', highWaterMark: 1 << 25 }
+  ytdlOptions: {
+    quality: 'highestaudio',
+    highWaterMark: 1 << 25
+  }
 });
 
-/* Inicializar play-dl (refresh token si hace falta) */
+// play-dl init (refresh token si aplica)
 (async () => {
   try {
     if (await play.is_expired()) await play.refreshToken();
   } catch (e) {
-    console.warn('play-dl init warning:', e?.message ?? e);
+    console.warn('[play-dl] init warning:', e?.message ?? e);
   }
 })();
 
 /* -----------------------------
-   Helpers: embeds + botones
+   Helpers: embed y botones
    ----------------------------- */
 function createNowPlayingEmbed(track) {
   return new EmbedBuilder()
-    .setTitle('🎶 Ahora sonando')
+    .setTitle('🎧 Now Playing')
     .setDescription(`[${track.title}](${track.url})`)
     .addFields(
-      { name: 'Duración', value: track.duration ?? 'Desconocida', inline: true },
-      { name: 'Solicitado por', value: track.requestedBy?.tag ?? 'Desconocido', inline: true },
-      { name: 'Fuente', value: track.source ?? 'Desconocida', inline: true }
+      { name: 'Duration', value: track.duration ?? 'Unknown', inline: true },
+      { name: 'Requested by', value: track.requestedBy?.tag ?? 'Unknown', inline: true },
+      { name: 'Source', value: track.source ?? 'Unknown', inline: true }
     )
     .setThumbnail(track.thumbnail ?? null)
-    .setFooter({ text: `Author: ${track.author ?? 'Desconocido'}` });
+    .setColor('#00C2FF') // celeste suave
+    .setFooter({ text: `Author: ${track.author ?? 'Unknown'}` });
 }
 
-function createControlButtons() {
+function createControlButtons(queue) {
   const pauseBtn = new ButtonBuilder().setCustomId('music_pause').setLabel('⏯').setStyle(ButtonStyle.Primary);
   const skipBtn = new ButtonBuilder().setCustomId('music_skip').setLabel('⏭').setStyle(ButtonStyle.Secondary);
   const loopBtn = new ButtonBuilder().setCustomId('music_loop').setLabel('🔁').setStyle(ButtonStyle.Secondary);
   const shuffleBtn = new ButtonBuilder().setCustomId('music_shuffle').setLabel('🔀').setStyle(ButtonStyle.Secondary);
   const stopBtn = new ButtonBuilder().setCustomId('music_stop').setLabel('⏹').setStyle(ButtonStyle.Danger);
-  const row = new ActionRowBuilder().addComponents(pauseBtn, skipBtn, loopBtn, shuffleBtn, stopBtn);
-  return row;
+
+  // Si quieres, se puede mostrar el repeatMode en el label, pero mantenemos simple
+  return new ActionRowBuilder().addComponents(pauseBtn, skipBtn, loopBtn, shuffleBtn, stopBtn);
 }
 
 /* -----------------------------
-   Eventos del player
+   Player events
    ----------------------------- */
 player.on('trackStart', (queue, track) => {
   try {
-    // enviar embed en el textChannel metadata (si existe)
+    // enviar embed y botones al textChannel guardado en metadata
     if (queue.metadata?.textChannel) {
-      queue.metadata.textChannel.send({ embeds: [createNowPlayingEmbed(track)], components: [createControlButtons()] }).catch(() => {});
+      queue.metadata.textChannel.send({ embeds: [createNowPlayingEmbed(track)], components: [createControlButtons(queue)] }).catch(() => {});
     }
-    // resetear votos para la nueva pista
+    // reset votes al comenzar nueva canción
     if (queue.metadata) queue.metadata.voteSkips = new Set();
   } catch (e) {
-    console.error('trackStart err:', e);
+    console.error('[player] trackStart err:', e);
   }
 });
 
 player.on('trackAdd', (queue, track) => {
   try {
     if (queue.metadata?.textChannel) {
-      queue.metadata.textChannel.send({ content: `➕ Añadida a la cola: **${track.title}** — solicitado por ${track.requestedBy?.tag ?? 'desconocido'}` }).catch(() => {});
+      queue.metadata.textChannel.send({ content: `➕ Added to queue: **${track.title}** — requested by ${track.requestedBy?.tag ?? 'unknown'}` }).catch(() => {});
     }
   } catch (e) {}
 });
 
 player.on('queueEnd', (queue) => {
   try {
-    if (queue.metadata?.textChannel) queue.metadata.textChannel.send('✅ Cola finalizada. Me desconecto.');
+    if (queue.metadata?.textChannel) queue.metadata.textChannel.send('✅ Queue finished. Leaving voice channel.');
     queue?.destroy?.();
   } catch (e) {}
 });
@@ -125,14 +150,24 @@ player.on('connectionError', (queue, error) => {
 });
 
 /* -----------------------------
-   Util: requisitos de voz y metadata
+   Util: voice checks & metadata
    ----------------------------- */
+function isChannelAllowed(interaction) {
+  // Permitir si el comando se ejecuta en uno de los canales de texto permitidos
+  if (EXTRA_ALLOWED_TEXT_CHANNELS.has(interaction.channelId)) return true;
+  // Permitir si el usuario está en un canal de voz (desde ahí se ejecuta)
+  if (interaction.member?.voice?.channel) return true;
+  return false;
+}
+
 function checkVoiceRequirements(interaction) {
+  // Usamos isChannelAllowed para permitir /help en canales especiales. Para la mayoría de comandos
+  // exigiremos que el usuario esté en un VC (excepto /help que puede ejecutarse desde canales permitidos)
   const memberVC = interaction.member?.voice?.channel;
-  if (!memberVC) return { ok: false, reply: 'Necesitas estar en un canal de voz para usar comandos de música.' };
+  if (!memberVC) return { ok: false, reply: 'You need to be in a voice channel to use this command.' };
   const botPerms = memberVC.permissionsFor(interaction.guild.members.me);
   if (!botPerms || !botPerms.has(PermissionsBitField.Flags.Connect) || !botPerms.has(PermissionsBitField.Flags.Speak)) {
-    return { ok: false, reply: 'No tengo permisos para conectarme o hablar en tu canal de voz. Revisa Connect / Speak.' };
+    return { ok: false, reply: 'I need Connect and Speak permissions in your voice channel.' };
   }
   return { ok: true, channel: memberVC };
 }
@@ -142,100 +177,128 @@ function ensureQueueMetadata(queue, textChannel) {
   if (!queue.metadata.textChannel) queue.metadata.textChannel = textChannel;
   if (!queue.metadata.allowedIds) queue.metadata.allowedIds = new Set();
   if (!queue.metadata.voteSkips) queue.metadata.voteSkips = new Set();
-  if (!queue.metadata.ownerId) queue.metadata.ownerId = null;
+  if (!queue.metadata.ownerId) queue.metadata.ownerId = null; // set when first play in session
 }
 
 /* -----------------------------
-   Botones (interacciones)
+   Buttons handler (controls)
    ----------------------------- */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
   const queue = player.getQueue(interaction.guildId);
-  if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
+  if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
 
   try {
     switch (interaction.customId) {
       case 'music_pause': {
-        if (!queue.playing) return interaction.reply({ content: 'No se está reproduciendo nada.', ephemeral: true });
+        if (!queue.playing) return interaction.reply({ content: 'Nothing is playing.', ephemeral: true });
         const paused = queue.connection.paused;
         queue.setPaused(!paused);
-        return interaction.reply({ content: paused ? '▶ Reanudado' : '⏸ Pausado', ephemeral: true });
+        return interaction.reply({ content: paused ? '▶ Resumed' : '⏸ Paused', ephemeral: true });
       }
       case 'music_skip': {
-        const userId = interaction.user.id;
-        const isOwner = queue.metadata.ownerId === userId;
-        const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(userId);
-        if (!isOwner && !isAllowed) return interaction.reply({ content: 'No tienes permisos para usar skip. Pide al creador que te dé permisos o usen /vote skip.', ephemeral: true });
+        const uid = interaction.user.id;
+        const isOwner = queue.metadata.ownerId === uid;
+        const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(uid);
+        if (!isOwner && !isAllowed) return interaction.reply({ content: 'You do not have permission to skip. Ask the creator to give you permission or use /vote skip.', ephemeral: true });
         await queue.skip();
-        return interaction.reply({ content: '⏭ Canción saltada.', ephemeral: true });
+        return interaction.reply({ content: '⏭ Skipped.', ephemeral: true });
       }
       case 'music_stop': {
-        const userId = interaction.user.id;
-        const isOwner = queue.metadata.ownerId === userId;
-        const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(userId);
-        if (!isOwner && !isAllowed) return interaction.reply({ content: 'No tienes permisos para detener la reproducción.', ephemeral: true });
+        const uid = interaction.user.id;
+        const isOwner = queue.metadata.ownerId === uid;
+        const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(uid);
+        if (!isOwner && !isAllowed) return interaction.reply({ content: 'You do not have permission to stop playback.', ephemeral: true });
         queue.destroy();
-        return interaction.reply({ content: '⏹ Reproducción detenida y cola limpiada.', ephemeral: true });
+        return interaction.reply({ content: '⏹ Stopped and cleared queue.', ephemeral: true });
       }
       case 'music_shuffle': {
         queue.shuffle();
-        return interaction.reply({ content: '🔀 Cola mezclada.', ephemeral: true });
+        return interaction.reply({ content: '🔀 Queue shuffled.', ephemeral: true });
       }
       case 'music_loop': {
-        const mode = queue.repeatMode === 1 ? 0 : 1;
-        queue.setRepeatMode(mode);
-        return interaction.reply({ content: `🔁 Modo repetición: ${mode === 0 ? 'off' : 'one'}.`, ephemeral: true });
+        const newMode = queue.repeatMode === 1 ? 0 : 1;
+        queue.setRepeatMode(newMode);
+        return interaction.reply({ content: `🔁 Repeat: ${newMode === 0 ? 'off' : 'one'}.`, ephemeral: true });
       }
       default:
-        return interaction.reply({ content: 'Acción desconocida.', ephemeral: true });
+        return interaction.reply({ content: 'Unknown action.', ephemeral: true });
     }
   } catch (e) {
-    console.error('button handle error:', e);
-    if (!interaction.replied) await interaction.reply({ content: 'Ocurrió un error con el control.', ephemeral: true });
+    console.error('button handler error:', e);
+    if (!interaction.replied) await interaction.reply({ content: 'An error occurred with the control.', ephemeral: true });
   }
 });
 
 /* -----------------------------
-   Comandos slash (todo en uno)
+   Slash commands handler
    ----------------------------- */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const cmd = interaction.commandName;
 
   try {
-    // ---------- /play ----------
+    // ---------- HELP ----------
+    if (cmd === 'help') {
+      // allow only in allowed text channels or if user in VC
+      if (!isChannelAllowed(interaction)) return interaction.reply({ content: 'Use this command in a voice channel or in the allowed channels.', ephemeral: true });
+
+      const embed = new EmbedBuilder()
+        .setTitle('SirgioMusicBOT - Command List')
+        .setColor('#00C2FF') // celeste
+        .setDescription('Commands list — use these in voice channels or the allowed text channels.\nStyle: gamer (we say "Song")')
+        .addFields(
+          { name: '/play song <query>', value: 'Plays a Song by name or URL. Adds to the queue if something is already playing.' },
+          { name: '/play playlist <service> <playlist_name>', value: 'Searches and adds a playlist from the chosen service.' },
+          { name: '/skip', value: 'Skip current Song (owner or permitted users). Others use /vote skip.' },
+          { name: '/pause', value: 'Pause playback (owner or permitted users).' },
+          { name: '/resume', value: 'Resume playback (owner or permitted users).' },
+          { name: '/bucle', value: 'Toggle loop on the current Song.' },
+          { name: '/any', value: 'Pick any random Song from the queue and play it next.' },
+          { name: '/random', value: 'Shuffle the queue.' },
+          { name: '/vote skip', value: 'Vote to skip the current Song. If more than half of humans in VC vote, it will skip.' },
+          { name: '/addpermiss @user', value: 'Creator gives control permissions to another user (skip/pause/resume/stop).' },
+          { name: '/clear', value: 'Clear next Songs in queue (creator only).' },
+          { name: '/karaoke <query>', value: 'Search for "query karaoke" and play the first result (instrumental/Karaoke versions).' },
+        )
+        .setFooter({ text: 'SirgioMusicBOT — Have fun!' });
+
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    // For other commands enforce channel allowedness: must be in VC or in allowed text channels
+    if (!isChannelAllowed(interaction)) return interaction.reply({ content: 'You must be in a voice channel to use music commands, or use the allowed text channels.', ephemeral: true });
+
+    // ---------- PLAY ----------
     if (cmd === 'play') {
       const sub = interaction.options.getSubcommand();
+      // if not in VC, check and connect
       const check = checkVoiceRequirements(interaction);
       if (!check.ok) return interaction.reply({ content: check.reply, ephemeral: true });
 
       await interaction.deferReply();
 
-      // create/obtain queue
       const queue = player.createQueue(interaction.guild, { metadata: { textChannel: interaction.channel }, leaveOnEmpty: true, leaveOnEnd: true });
       ensureQueueMetadata(queue, interaction.channel);
 
-      // connect to VC if needed
       try {
         if (!queue.connection) await queue.connect(check.channel);
       } catch (err) {
         queue.destroy();
-        return interaction.editReply('No pude conectar al canal de voz.');
+        return interaction.editReply('Could not join your voice channel.');
       }
 
-      // set ownerId if not set (quien inició la reproducción en la sesión)
       if (!queue.metadata.ownerId) queue.metadata.ownerId = interaction.user.id;
 
       if (sub === 'song') {
         const query = interaction.options.getString('query', true);
-        const result = await player.search(query, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
-        if (!result || !result.tracks.length) return interaction.editReply(`❌ No encontré resultados para \`${query}\`.`);
+        const search = await player.search(query, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
+        if (!search || !search.tracks.length) return interaction.editReply(`❌ No results for \`${query}\`.`);
 
-        const track = result.tracks[0];
+        const track = search.tracks[0];
         queue.addTrack(track);
         if (!queue.playing) await queue.play();
-        const embed = createNowPlayingEmbed(track);
-        return interaction.editReply({ content: `➕ Añadida a la cola: **${track.title}**`, embeds: [embed], components: [createControlButtons()] });
+        return interaction.editReply({ content: `➕ Added to queue: **${track.title}**`, embeds: [createNowPlayingEmbed(track)], components: [createControlButtons(queue)] });
       }
 
       if (sub === 'playlist') {
@@ -248,205 +311,212 @@ client.on('interactionCreate', async (interaction) => {
           else if (service.includes('soundcloud')) query = `${playlistName} playlist soundcloud`;
         }
         const res = await player.search(query, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
-        if (!res || !res.tracks.length) return interaction.editReply(`❌ No encontré la playlist \`${playlistName}\` en ${service}.`);
-
+        if (!res || !res.tracks.length) return interaction.editReply(`❌ No playlist found for \`${playlistName}\` on ${service}.`);
         if (res.playlist) {
           queue.addTracks(res.tracks);
           if (!queue.playing) await queue.play();
-          return interaction.editReply(`✅ Playlist añadida: **${res.playlist.title ?? playlistName}** — ${res.tracks.length} canciones.`);
+          return interaction.editReply(`✅ Playlist added: **${res.playlist.title ?? playlistName}** — ${res.tracks.length} Songs.`);
         } else {
           queue.addTracks(res.tracks);
           if (!queue.playing) await queue.play();
-          return interaction.editReply(`✅ Añadidas ${res.tracks.length} canciones encontradas como playlist.`);
+          return interaction.editReply(`✅ Added ${res.tracks.length} Songs as playlist search results.`);
         }
       }
     }
 
-    // ---------- /skip ----------
+    // ---------- SKIP ----------
     if (cmd === 'skip') {
       const queue = player.getQueue(interaction.guildId);
-      if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
+      if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
 
-      const userId = interaction.user.id;
-      const isOwner = queue.metadata.ownerId === userId;
-      const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(userId);
-      if (!isOwner && !isAllowed) return interaction.reply({ content: 'No tienes permisos para usar /skip. Usa /vote skip.', ephemeral: true });
+      const uid = interaction.user.id;
+      const isOwner = queue.metadata.ownerId === uid;
+      const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(uid);
+      if (!isOwner && !isAllowed) return interaction.reply({ content: 'You do not have permission to use /skip. Use /vote skip to request a skip.', ephemeral: true });
 
       await queue.skip();
-      return interaction.reply({ content: '⏭ Canción saltada.' });
+      return interaction.reply({ content: '⏭ Skipped current Song.' });
     }
 
-    // ---------- /pause ----------
+    // ---------- PAUSE ----------
     if (cmd === 'pause') {
       const check = checkVoiceRequirements(interaction);
       if (!check.ok) return interaction.reply({ content: check.reply, ephemeral: true });
-      const queue = player.getQueue(interaction.guildId);
-      if (!queue || !queue.playing) return interaction.reply({ content: 'No hay reproducción activa.', ephemeral: true });
 
-      const userId = interaction.user.id;
-      const isOwner = queue.metadata.ownerId === userId;
-      const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(userId);
-      if (!isOwner && !isAllowed) return interaction.reply({ content: 'No tienes permiso para pausar.', ephemeral: true });
+      const queue = player.getQueue(interaction.guildId);
+      if (!queue || !queue.playing) return interaction.reply({ content: 'Nothing is playing right now.', ephemeral: true });
+
+      const uid = interaction.user.id;
+      const isOwner = queue.metadata.ownerId === uid;
+      const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(uid);
+      if (!isOwner && !isAllowed) return interaction.reply({ content: 'You do not have permission to pause.', ephemeral: true });
 
       queue.setPaused(true);
-      return interaction.reply({ content: '⏸ Reproducción pausada.' });
+      return interaction.reply({ content: '⏸ Paused.' });
     }
 
-    // ---------- /resume ----------
+    // ---------- RESUME ----------
     if (cmd === 'resume') {
       const check = checkVoiceRequirements(interaction);
       if (!check.ok) return interaction.reply({ content: check.reply, ephemeral: true });
-      const queue = player.getQueue(interaction.guildId);
-      if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
 
-      const userId = interaction.user.id;
-      const isOwner = queue.metadata.ownerId === userId;
-      const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(userId);
-      if (!isOwner && !isAllowed) return interaction.reply({ content: 'No tienes permiso para reanudar.', ephemeral: true });
+      const queue = player.getQueue(interaction.guildId);
+      if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
+
+      const uid = interaction.user.id;
+      const isOwner = queue.metadata.ownerId === uid;
+      const isAllowed = queue.metadata.allowedIds && queue.metadata.allowedIds.has(uid);
+      if (!isOwner && !isAllowed) return interaction.reply({ content: 'You do not have permission to resume.', ephemeral: true });
 
       queue.setPaused(false);
-      return interaction.reply({ content: '▶ Reproducción reanudada.' });
+      return interaction.reply({ content: '▶ Resumed.' });
     }
 
-    // ---------- /bucle ----------
+    // ---------- BUCLE (loop current) ----------
     if (cmd === 'bucle') {
       const queue = player.getQueue(interaction.guildId);
-      if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
+      if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
       const currentMode = queue.repeatMode;
       const newMode = currentMode === 1 ? 0 : 1;
       queue.setRepeatMode(newMode);
-      return interaction.reply({ content: `🔁 Modo repetición: ${newMode === 0 ? 'off' : 'one'}.` });
+      return interaction.reply({ content: `🔁 Repeat mode: ${newMode === 0 ? 'off' : 'one'}.` });
     }
 
-    // ---------- /any ----------
+    // ---------- ANY ----------
     if (cmd === 'any') {
       const queue = player.getQueue(interaction.guildId);
-      if (!queue || !queue.playing) return interaction.reply({ content: 'No hay playlist/cola activa.', ephemeral: true });
-      if (!queue.tracks.length) return interaction.reply({ content: 'No hay más canciones en la cola.', ephemeral: true });
-      const randomIndex = Math.floor(Math.random() * queue.tracks.length);
-      const track = queue.tracks.splice(randomIndex, 1)[0];
+      if (!queue || !queue.playing) return interaction.reply({ content: 'No active queue.', ephemeral: true });
+      if (!queue.tracks.length) return interaction.reply({ content: 'No more Songs in queue.', ephemeral: true });
+      const idx = Math.floor(Math.random() * queue.tracks.length);
+      const track = queue.tracks.splice(idx, 1)[0];
       queue.insertTrack(0, track);
-      return interaction.reply({ content: `🎲 Reproduciendo cualquier canción: **${track.title}** (será la siguiente).` });
+      return interaction.reply({ content: `🎲 Any Song selected: **${track.title}** — will play next.` });
     }
 
-    // ---------- /random ----------
+    // ---------- RANDOM (shuffle) ----------
     if (cmd === 'random') {
       const queue = player.getQueue(interaction.guildId);
-      if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
+      if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
       queue.shuffle();
-      return interaction.reply({ content: '🔀 Cola mezclada.' });
+      return interaction.reply({ content: '🔀 Queue shuffled.' });
     }
 
-    // ---------- /vote skip ----------
+    // ---------- VOTE SKIP ----------
     if (cmd === 'vote') {
       const sub = interaction.options.getSubcommand();
       if (sub === 'skip') {
         const queue = player.getQueue(interaction.guildId);
-        if (!queue || !queue.playing) return interaction.reply({ content: 'No hay reproducción activa.', ephemeral: true });
+        if (!queue || !queue.playing) return interaction.reply({ content: 'No active Song to vote on.', ephemeral: true });
 
-        const userId = interaction.user.id;
-        const isOwner = queue.metadata.ownerId === userId;
-        if (isOwner) {
-          await queue.skip();
-          return interaction.reply({ content: 'Eres el creador, salté la canción.' });
-        }
+        const uid = interaction.user.id;
+        const isOwner = queue.metadata.ownerId === uid;
+        if (isOwner) { await queue.skip(); return interaction.reply({ content: 'You are the creator — Song skipped.' }); }
 
         const vc = interaction.member.voice.channel;
-        if (!vc) return interaction.reply({ content: 'Debes estar en el mismo canal de voz para votar.', ephemeral: true });
+        if (!vc) return interaction.reply({ content: 'You must be in the same voice channel to vote.', ephemeral: true });
 
         ensureQueueMetadata(queue, interaction.channel);
         const voters = queue.metadata.voteSkips || new Set();
-        if (voters.has(userId)) return interaction.reply({ content: 'Ya votaste para saltar esta canción.', ephemeral: true });
-        voters.add(userId);
+        if (voters.has(uid)) return interaction.reply({ content: 'You already voted to skip this Song.', ephemeral: true });
+        voters.add(uid);
         queue.metadata.voteSkips = voters;
 
-        const members = vc.members.filter(m => !m.user.bot);
-        const needed = Math.floor(members.size / 2) + 1;
+        // majority > 50% of human members in VC
+        const humans = vc.members.filter(m => !m.user.bot);
+        const needed = Math.floor(humans.size / 2) + 1;
         const votes = voters.size;
 
         if (votes >= needed) {
           await queue.skip();
           queue.metadata.voteSkips = new Set();
-          return interaction.reply({ content: `✅ Votos suficientes (${votes}/${members.size}). Canción saltada.` });
+          return interaction.reply({ content: `✅ Votes sufficient (${votes}/${humans.size}). Song skipped.` });
         } else {
-          return interaction.reply({ content: `🗳 Voto registrado (${votes}/${needed}). Se necesitan ${needed} votos (miembros humanos en el VC: ${members.size}).` });
+          return interaction.reply({ content: `🗳 Vote registered (${votes}/${needed}). Need ${needed} votes (humans in VC: ${humans.size}).` });
         }
       }
     }
 
-    // ---------- /addpermiss ----------
+    // ---------- ADD PERMISS ----------
     if (cmd === 'addpermiss') {
       const target = interaction.options.getUser('user', true);
       const queue = player.getQueue(interaction.guildId);
-      if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
-      if (queue.metadata.ownerId !== interaction.user.id) return interaction.reply({ content: 'Solo el creador puede dar permisos.', ephemeral: true });
+      if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
+      if (queue.metadata.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the creator can grant permissions.', ephemeral: true });
 
       ensureQueueMetadata(queue, interaction.channel);
       queue.metadata.allowedIds.add(target.id);
-      return interaction.reply({ content: `✅ ${target.tag} ahora tiene permisos para controlar la reproducción en esta sesión.` });
+      return interaction.reply({ content: `✅ ${target.tag} now has control permissions for this session.` });
     }
 
-    // ---------- /clear ----------
+    // ---------- CLEAR ----------
     if (cmd === 'clear') {
       const queue = player.getQueue(interaction.guildId);
-      if (!queue) return interaction.reply({ content: 'No hay cola activa.', ephemeral: true });
-      if (queue.metadata.ownerId !== interaction.user.id) return interaction.reply({ content: 'Solo el creador puede limpiar la cola.', ephemeral: true });
+      if (!queue) return interaction.reply({ content: 'No active queue.', ephemeral: true });
+      if (queue.metadata.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the creator can clear the queue.', ephemeral: true });
 
       queue.clear();
-      return interaction.reply({ content: '🧹 Cola limpiada (se detuvieron las siguientes canciones).' });
+      return interaction.reply({ content: '🧹 Queue cleared (next Songs removed).' });
     }
 
-    // ---------- /karaoke ----------
+    // ---------- KARAOKE ----------
     if (cmd === 'karaoke') {
       const query = interaction.options.getString('query', true);
       const check = checkVoiceRequirements(interaction);
       if (!check.ok) return interaction.reply({ content: check.reply, ephemeral: true });
 
       await interaction.deferReply();
-      const queue = player.createQueue(interaction.guild, { metadata: { textChannel: interaction.channel } });
+
+      const queue = player.createQueue(interaction.guild, { metadata: { textChannel: interaction.channel }, leaveOnEmpty: true, leaveOnEnd: true });
       ensureQueueMetadata(queue, interaction.channel);
-      try { if (!queue.connection) await queue.connect(check.channel); } catch (e) { queue.destroy(); return interaction.editReply('No pude conectar al canal de voz.'); }
+      try { if (!queue.connection) await queue.connect(check.channel); } catch (e) { queue.destroy(); return interaction.editReply('Could not join your voice channel.'); }
 
       if (!queue.metadata.ownerId) queue.metadata.ownerId = interaction.user.id;
 
-      const kquery = `${query} karaoke instrumental karaoke version`;
+      // Buscar versión karaoke agregando "karaoke"
+      const kquery = `${query} karaoke`;
       const res = await player.search(kquery, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
-      if (!res || !res.tracks.length) return interaction.editReply(`❌ No encontré versión karaoke de \`${query}\`.`);
+      if (!res || !res.tracks.length) return interaction.editReply(`❌ No karaoke version found for \`${query}\`.`);
 
       const track = res.tracks[0];
       queue.addTrack(track);
       if (!queue.playing) await queue.play();
-      return interaction.editReply({ content: `🎤 Añadida versión karaoke: **${track.title}**`, embeds: [createNowPlayingEmbed(track)] });
+      return interaction.editReply({ content: `🎤 Karaoke added: **${track.title}**`, embeds: [createNowPlayingEmbed(track)] });
     }
 
   } catch (err) {
-    console.error('Comando error:', err);
+    console.error('[cmd] error:', err);
     try {
-      if (interaction.deferred || interaction.replied) await interaction.editReply({ content: 'Ocurrió un error al ejecutar el comando.' });
-      else await interaction.reply({ content: 'Ocurrió un error al ejecutar el comando.', ephemeral: true });
+      if (interaction.deferred || interaction.replied) await interaction.editReply({ content: 'An error occurred running the command.' });
+      else await interaction.reply({ content: 'An error occurred running the command.', ephemeral: true });
     } catch (e) { console.error(e); }
   }
 });
 
 /* -----------------------------
-   Registrar comandos (ready)
+   Register guild commands on startup (local registration)
    ----------------------------- */
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
-  // Registrar comandos (guild-scoped si GUILD_ID dado, si no global)
+  // register commands for the GUILD_ID specified (local)
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
-    if (GUILD_ID) {
-      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-      console.log('Comandos registrados en GUILD:', GUILD_ID);
-    } else {
-      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-      console.log('Comandos registrados globalmente (tarda en propagarse).');
-    }
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: rawCommands });
+    console.log('Local guild commands registered for', GUILD_ID);
   } catch (err) {
-    console.error('Error registrando comandos:', err);
+    console.error('Error registering guild commands:', err);
   }
 });
 
+/* -----------------------------
+   Minimal express to keep alive (optional)
+   ----------------------------- */
+const app = express();
+app.get('/', (req, res) => res.send('SirgioMusicBOT alive.'));
+const server = http.createServer(app);
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Express server listening on ${PORT}`));
+
+/* -----------------------------
+   Login
+   ----------------------------- */
 client.login(TOKEN);
