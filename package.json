@@ -1,25 +1,20 @@
 {
   "name": "sirgio-music-bot",
   "version": "1.0.0",
-  "description": "Sistema musical avanzado de SirgioMusicBOT con discord-player v6",
+  "description": "Bot de música para comunidad gamer con sistema de /help, soporte a karaoke y música limpia.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "test": "echo \"No test specified\" && exit 0"
-  },
-  "author": "SirgioBOT Dev Team",
-  "license": "MIT",
-  "dependencies": {
-    "discord.js": "^14.16.3",
-    "@discordjs/voice": "^0.16.1",
-    "discord-player": "^6.7.1",
-    "@discord-player/extractor": "^4.5.0",
-    "ffmpeg-static": "^5.2.0",
-    "libsodium-wrappers": "^0.7.13",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.1"
+    "start": "node index.js"
   },
   "engines": {
     "node": "20.x"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.9.0",
+    "@discordjs/voice": "^0.16.1",
+    "discord-player": "^6.7.1",
+    "discord.js": "^14.15.3",
+    "play-dl": "^1.9.7",
+    "dotenv": "^16.4.5"
   }
 }
