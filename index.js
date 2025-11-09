@@ -4,11 +4,13 @@ const { Client, GatewayIntentBits, Partials, Collection, PermissionsBitField, Em
 const express = require('express');
 const { Player, QueryType, QueueRepeatMode } = require('discord-player');
 
+// ✅ Usa variables de entorno directamente, sin exigir archivo .env
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+
+// Muestra advertencia si no está definido, pero no detiene el proceso (Render lo inyecta después)
 if (!TOKEN) {
-  console.error('Por favor define TOKEN en .env');
-  process.exit(1);
+  console.warn('⚠️ TOKEN no detectado localmente. Asegúrate de definirlo en las variables de entorno de Render.');
 }
 
 /**
