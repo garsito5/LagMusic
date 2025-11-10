@@ -14,10 +14,21 @@ const express = require('express');
 const { Player, QueryType, QueueRepeatMode } = require('discord-player');
 const playdl = require('play-dl');
 
+// Cargar extractores de play-dl (necesario para YouTube, Spotify, etc.)
+(async () => {
+  try {
+    await playdl.extractors.load();
+    console.log("✅ Extractores de play-dl cargados correctamente.");
+  } catch (err) {
+    console.error("❌ Error al cargar extractores:", err);
+  }
+})();
+
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const PORT = process.env.PORT || 3000;
+
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.warn('⚠️ TOKEN, CLIENT_ID o GUILD_ID no están definidas en las env vars. Revisa Render.');
