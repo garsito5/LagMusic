@@ -6,30 +6,31 @@ const {
   GatewayIntentBits,
   Partials,
   EmbedBuilder,
-  PermissionsBitField,
-  Collection
+  REST,
+  Routes,
 } = require('discord.js');
 
 const express = require('express');
 const { Player, QueryType, QueueRepeatMode } = require('discord-player');
-const playdl = require('play-dl');
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-if (!TOKEN || !CLIENT_ID) {
-  console.warn('⚠️ TOKEN o CLIENT_ID no están definidas en las env vars. Asegúrate en Render.');
-  // No exit here to allow local testing without .env — pero es recomendable definirlas.
+const GUILD_ID = process.env.GUILD_ID; // tu servidor (ej: 1212886282645147768)
+const PORT = process.env.PORT || 3000;
+
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.warn('⚠️ Falta TOKEN, CLIENT_ID o GUILD_ID en variables de entorno. Revisa Render Environment.');
+  // No hacemos exit para permitir debugging local, pero es recomendable definirlas.
 }
 
 /**
- * ========== Config ==========
+ * CONFIG
  */
 const HELP_CHANNEL_IDS = ['1422809286417059850', '1222966360263626865'];
 const HELP_COLOR = 0x8A2BE2; // púrpura
-const PORT = process.env.PORT || 3000;
 
 /**
- * ========== Cliente y Player ==========
+ * CLIENT Y PLAYER
  */
 const client = new Client({
   intents: [
@@ -50,19 +51,14 @@ const player = new Player(client, {
 });
 
 /**
- * ========== Datos en memoria ==========
- *
- * voiceChannelCreators: channelId -> userId (quien creó / primer user en TempVoice)
- * channelPermittedUsers: channelId -> Set(userId)  (usuarios a los que el creador dio permisos)
- * voteSkips: channelId -> Set(userId) (votos del skip actuales)
- * history: channelId -> [ trackInfo ]  (historial reproducido en ese canal - para /any)
+ * DATOS EN MEMORIA
  */
-const voiceChannelCreators = new Map();
-const channelPermittedUsers = new Map();
-const voteSkips = new Map();
-const channelHistory = new Map();
+const voiceChannelCreators = new Map();      // channelId -> creatorUserId
+const channelPermittedUsers = new Map();    // channelId -> Set(userId)
+const voteSkips = new Map();                // channelId -> Set(userId) (votos actuales)
+const channelHistory = new Map();           // channelId -> [{title,url,requestedBy}]
+const playlistSources = new Map();          // optional metadata per queue if needed
 
-/** Helpers para sets/maps */
 function ensurePermSet(vcId) {
   if (!channelPermittedUsers.has(vcId)) channelPermittedUsers.set(vcId, new Set());
 }
@@ -72,7 +68,6 @@ function ensureVoteSet(vcId) {
 function ensureHistory(vcId) {
   if (!channelHistory.has(vcId)) channelHistory.set(vcId, []);
 }
-
 function isCreatorOrPermitted(member, voiceChannelId) {
   if (!member) return false;
   const creator = voiceChannelCreators.get(voiceChannelId);
@@ -83,9 +78,8 @@ function isCreatorOrPermitted(member, voiceChannelId) {
 }
 
 /**
- * ========== Auto-registro de comandos (por guilds cacheadas) ==========
- * Definimos todos los comandos que pediste: play, play_playlist, skip, vote_skip,
- * pause, resume, bucle, stop_bucle, random, any, add_permiss, clear, karaoke, ping, help
+ * DEFINICIÓN DE SLASH COMMANDS (GUILD ONLY)
+ * Nota: required options primero, luego opcionales.
  */
 const slashCommands = [
   {
@@ -97,23 +91,23 @@ const slashCommands = [
   },
   {
     name: 'play_playlist',
-    description: 'Reproduce una playlist (URL o platform + nombre)',
+    description: 'Reproduce una playlist (URL o nombre). Usa platform opcionalmente.',
     options: [
-      { name: 'platform', description: 'Plataforma (youtube/spotify/ytmusic/soundcloud) o "url"', type: 3, required: false },
-      { name: 'name', description: 'Nombre de la playlist o URL', type: 3, required: true }
+      { name: 'name', description: 'Nombre o URL de la playlist', type: 3, required: true },
+      { name: 'platform', description: 'Plataforma (youtube, spotify, ytmusic, soundcloud) — opcional', type: 3, required: false }
     ]
   },
-  { name: 'skip', description: 'Salta la canción (solo creador o usuario con permiso)' },
-  { name: 'vote_skip', description: 'Vota para saltar la canción (si >50% del canal vota, se salta)' },
-  { name: 'pause', description: 'Pausa la canción' },
-  { name: 'resume', description: 'Reanuda la canción' },
-  { name: 'bucle', description: 'Activa bucle en la canción actual' },
+  { name: 'skip', description: 'Salta la canción (creador o usuario con permiso)' },
+  { name: 'vote_skip', description: 'Vota para saltar la canción (>50% necesario)' },
+  { name: 'pause', description: 'Pausa la reproducción' },
+  { name: 'resume', description: 'Reanuda la reproducción' },
+  { name: 'bucle', description: 'Activa bucle (repite la canción actual)' },
   { name: 'stop_bucle', description: 'Desactiva el bucle' },
-  { name: 'random', description: 'Activa/desactiva modo aleatorio (shuffle) de la cola' },
-  { name: 'any', description: 'Reproduce cualquier canción aleatoria de la playlist actual o historial' },
+  { name: 'random', description: 'Mezcla la cola (shuffle)' },
+  { name: 'any', description: 'Reproduce cualquier canción de la playlist o historial' },
   {
     name: 'add_permiss',
-    description: 'El creador del canal da permisos a otro usuario',
+    description: 'El creador da permisos a otro usuario',
     options: [{ name: 'usuario', description: 'Usuario a quien dar permisos', type: 6, required: true }]
   },
   { name: 'clear', description: 'El creador borra las siguientes canciones de la cola' },
@@ -122,75 +116,69 @@ const slashCommands = [
     description: 'Busca y reproduce una versión karaoke/instrumental de la canción',
     options: [{ name: 'query', description: 'Nombre de la canción', type: 3, required: true }]
   },
-  { name: 'ping', description: 'Muestra la latencia del bot' },
+  { name: 'ping', description: 'Muestra latencia' },
   { name: 'help', description: 'Muestra los comandos (solo en voz o canales permitidos)' }
 ];
 
+/**
+ * REGISTRAR COMANDOS EN EL GUILD ID
+ */
 client.once('ready', async () => {
   console.log(`✅ Conectado como ${client.user.tag}`);
 
   try {
-    // Registrar comandos en cada guild cacheada (rápido)
-    const guildIds = client.guilds.cache.map(g => g.id);
-    for (const gid of guildIds) {
-      const guild = await client.guilds.fetch(gid).catch(() => null);
-      if (!guild) continue;
-      await guild.commands.set(slashCommands);
-      console.log(`Comandos registrados en guild ${gid}`);
-    }
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: slashCommands });
+    console.log(`✅ Slash commands registrados en guild ${GUILD_ID}`);
   } catch (err) {
-    console.warn('No se pudieron registrar todos los comandos:', err?.message ?? err);
+    console.error('❌ Error registrando comandos en guild:', err);
   }
 
   // Express keep-alive
   const app = express();
-  app.get('/', (req, res) => res.send('Sirgio Music Bot (Music) alive'));
+  app.get('/', (req, res) => res.send('Sirgio Music Bot (music) - alive'));
   app.listen(PORT, () => console.log(`🌐 Web server listening on ${PORT}`));
 });
 
 /**
- * ========== Player events ==========
- * Cuando empieza una pista guardamos en historial y limpiamos votos.
+ * PLAYER EVENTS
  */
 player.on('trackStart', (queue, track) => {
   try {
     const vcId = queue.metadata.voiceChannel.id;
-    // reset votes for this track
     voteSkips.set(vcId, new Set());
     ensureHistory(vcId);
     const h = channelHistory.get(vcId);
-    // push a compact track info (limitar tamaño del historial)
     h.push({ title: track.title, url: track.url, requestedBy: track.requestedBy?.id ?? null });
-    if (h.length > 200) h.shift();
+    if (h.length > 300) h.shift();
 
     const embed = new EmbedBuilder()
       .setTitle('▶ Reproduciendo ahora')
       .setDescription(`[${track.title}](${track.url})`)
       .addFields(
         { name: 'Duración', value: track.duration ?? 'Desconocida', inline: true },
-        { name: 'Solicitado por', value: `${track.requestedBy?.username ?? 'Desconocido'}`, inline: true }
+        { name: 'Solicitado por', value: `${track.requestedBy?.tag ?? 'Desconocido'}`, inline: true }
       )
-      .setTimestamp();
+      .setTimestamp()
+      .setColor(HELP_COLOR);
 
-    // send a short notification to text channel
     if (queue.metadata && queue.metadata.textChannel) {
-      queue.metadata.textChannel.send({ embeds: [embed] }).catch(() => { });
+      queue.metadata.textChannel.send({ embeds: [embed] }).catch(() => {});
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) { console.error('trackStart err', e); }
 });
 
 player.on('queueEnd', (queue) => {
   try {
     const vcId = queue.metadata.voiceChannel.id;
-    // limpiamos maps relacionados
     voiceChannelCreators.delete(vcId);
     channelPermittedUsers.delete(vcId);
     voteSkips.delete(vcId);
-    // Responder en texto que la cola terminó
+    channelHistory.delete(vcId);
     if (queue.metadata && queue.metadata.textChannel) {
-      queue.metadata.textChannel.send('La cola ha terminado. Me desconecto.').catch(() => { });
+      queue.metadata.textChannel.send('La cola ha terminado. Me desconecto.').catch(() => {});
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) { console.error('queueEnd err', e); }
 });
 
 player.on('error', (queue, error) => {
@@ -198,87 +186,89 @@ player.on('error', (queue, error) => {
 });
 
 /**
- * ========== Interaction handler (slash commands) ==========
+ * INTERACTIONS (slash commands)
+ * Nota: para evitar "la aplicación no ha respondido" y errores de doble respuesta:
+ * - Siempre hacemos deferReply({ ephemeral: true }) al comenzar (la respuesta final será editReply)
  */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  // Defer early
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (e) {
+    // si ya fue respondida de otro modo, evitamos crash
+    console.warn('deferReply failed:', e?.message ?? e);
+  }
 
   const { commandName } = interaction;
   const member = interaction.member;
   const guild = interaction.guild;
 
-  // Utility: require the user to be in voice for most commands (with proper message)
   const requireVoice = (reply = true) => {
     if (!member || !member.voice || !member.voice.channel) {
-      if (reply) interaction.reply({ content: 'Tienes que estar en un canal de voz para usar este comando.', ephemeral: true });
+      if (reply) {
+        try { interaction.editReply({ content: 'Tienes que estar en un canal de voz para usar este comando.', ephemeral: true }); } catch (e) {}
+      }
       return false;
     }
     return true;
   };
 
   try {
-    // Defer reply when we expect some processing (so Discord doesn't show "La aplicación no ha respondido")
-    await interaction.deferReply({ ephemeral: true });
-
     switch (commandName) {
-      // -------------------- PLAY (busca canción y la agrega) --------------------
+      // -------------------------------- PLAY
       case 'play': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const query = interaction.options.getString('query', true);
         const voiceChannel = member.voice.channel;
 
-        // registrar creador si no existe
         if (!voiceChannelCreators.has(voiceChannel.id)) voiceChannelCreators.set(voiceChannel.id, member.id);
 
-        // crear / obtener queue para guild
         const queue = player.createQueue(guild, {
-          metadata: { textChannel: interaction.channel, voiceChannel: voiceChannel }
+          metadata: { textChannel: interaction.channel, voiceChannel }
         });
 
-        // conectar si es necesario
         if (!queue.connection) {
           try {
             await queue.connect(voiceChannel);
           } catch (err) {
             queue.destroy();
-            return interaction.editReply({ content: 'No pude conectar al canal de voz.' });
+            await interaction.editReply({ content: 'No pude conectar al canal de voz.' });
+            break;
           }
         }
 
-        // Buscar la canción (auto engine)
-        const searchResult = await player.search(query, {
-          requestedBy: interaction.user,
-          searchEngine: QueryType.AUTO
-        });
-
+        const searchResult = await player.search(query, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
         if (!searchResult || !searchResult.tracks.length) {
-          return interaction.editReply({ content: `No se encontró la canción: ${query}` });
+          await interaction.editReply({ content: `No se encontró la canción: ${query}` });
+          break;
         }
 
-        // Si es playlist en búsqueda automática, manejar tracks
         if (searchResult.playlist) {
           await queue.addTracks(searchResult.playlist.tracks);
           if (!queue.playing) await queue.play();
-          return interaction.editReply({ content: `Playlist añadida: ${searchResult.playlist.title} — ${searchResult.tracks.length} canciones.` });
+          await interaction.editReply({ content: `Playlist añadida: ${searchResult.playlist.title} — ${searchResult.tracks.length} canciones.` });
         } else {
           const track = searchResult.tracks[0];
           await queue.addTrack(track);
           if (!queue.playing) await queue.play();
-          return interaction.editReply({ content: `Añadido a la cola: **${track.title}**` });
+          await interaction.editReply({ content: `Añadido a la cola: **${track.title}**` });
         }
+        break;
       }
 
-      // -------------------- PLAY_PLAYLIST (url o platform+name) --------------------
+      // ----------------------------- PLAY_PLAYLIST
       case 'play_playlist': {
-        if (!requireVoice()) return;
-        const platform = interaction.options.getString('platform', false);
+        if (!requireVoice()) break;
         const name = interaction.options.getString('name', true);
+        const platform = interaction.options.getString('platform', false);
         const voiceChannel = member.voice.channel;
 
         if (!voiceChannelCreators.has(voiceChannel.id)) voiceChannelCreators.set(voiceChannel.id, member.id);
 
         const queue = player.createQueue(guild, {
-          metadata: { textChannel: interaction.channel, voiceChannel: voiceChannel }
+          metadata: { textChannel: interaction.channel, voiceChannel }
         });
 
         if (!queue.connection) {
@@ -286,68 +276,73 @@ client.on('interactionCreate', async (interaction) => {
             await queue.connect(voiceChannel);
           } catch (err) {
             queue.destroy();
-            return interaction.editReply({ content: 'No pude conectar al canal de voz.' });
+            await interaction.editReply({ content: 'No pude conectar al canal de voz.' });
+            break;
           }
         }
 
-        // Si el usuario pasó una URL real (youtube/spotify), dejemos que player la detecte
         let searchQuery = name;
         if (platform && platform.toLowerCase() !== 'url') {
           searchQuery = `${platform} playlist ${name}`;
         }
 
-        const result = await player.search(searchQuery, {
-          requestedBy: interaction.user,
-          searchEngine: QueryType.AUTO
-        });
-
+        const result = await player.search(searchQuery, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
         if (!result || !result.tracks.length) {
-          return interaction.editReply({ content: `No encontré la playlist: ${platform ?? ''} ${name}` });
+          await interaction.editReply({ content: `No encontré la playlist: ${platform ?? ''} ${name}` });
+          break;
         }
 
-        // Añadir todas las tracks
         const tracksToAdd = result.playlist ? result.playlist.tracks : result.tracks;
         await queue.addTracks(tracksToAdd);
         if (!queue.playing) await queue.play();
 
-        return interaction.editReply({ content: `Se añadieron ${tracksToAdd.length} canciones a la cola.` });
+        await interaction.editReply({ content: `Se añadieron ${tracksToAdd.length} canciones a la cola.` });
+        break;
       }
 
-      // -------------------- SKIP --------------------
+      // ----------------------------- SKIP
       case 'skip': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue || !queue.playing) return interaction.editReply({ content: 'No hay nada reproduciéndose.' });
+        if (!queue || !queue.playing) {
+          await interaction.editReply({ content: 'No hay nada reproduciéndose.' });
+          break;
+        }
 
         if (isCreatorOrPermitted(member, voiceChannel.id)) {
           queue.skip();
-          return interaction.editReply({ content: 'Canción saltada (creador/permiso).' });
+          await interaction.editReply({ content: 'Canción saltada (creador/permiso).' });
         } else {
-          return interaction.editReply({ content: 'No puedes usar /skip directamente. Usa /vote_skip para iniciar una votación.' });
+          await interaction.editReply({ content: 'No puedes usar /skip directamente. Usa /vote_skip para iniciar una votación.' });
         }
+        break;
       }
 
-      // -------------------- VOTE_SKIP --------------------
+      // ----------------------------- VOTE_SKIP
       case 'vote_skip': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue || !queue.playing) return interaction.editReply({ content: 'No hay nada reproduciéndose.' });
+        if (!queue || !queue.playing) {
+          await interaction.editReply({ content: 'No hay nada reproduciéndose.' });
+          break;
+        }
 
-        // Si es creator o tiene permiso, skip directo
         if (isCreatorOrPermitted(member, voiceChannel.id)) {
           queue.skip();
-          return interaction.editReply({ content: 'Canción saltada (eres creador/tienes permiso).' });
+          await interaction.editReply({ content: 'Canción saltada (eres creador/tienes permiso).' });
+          break;
         }
 
         ensureVoteSet(voiceChannel.id);
         const votes = voteSkips.get(voiceChannel.id);
-        if (votes.has(member.id)) return interaction.editReply({ content: 'Ya votaste para saltar esta canción.' });
+        if (votes.has(member.id)) {
+          await interaction.editReply({ content: 'Ya votaste para saltar esta canción.' });
+          break;
+        }
 
         votes.add(member.id);
-
-        // calcular required = más de la mitad de los miembros humanos del canal
         const membersInVC = voiceChannel.members.filter(m => !m.user.bot);
         const required = Math.floor(membersInVC.size / 2) + 1;
         const current = votes.size;
@@ -355,211 +350,209 @@ client.on('interactionCreate', async (interaction) => {
         if (current >= required) {
           voteSkips.set(voiceChannel.id, new Set());
           queue.skip();
-          return interaction.editReply({ content: `Se alcanzó la votación (${current}/${membersInVC.size}). Canción saltada.` });
+          await interaction.editReply({ content: `Se alcanzó la votación (${current}/${membersInVC.size}). Canción saltada.` });
         } else {
-          return interaction.editReply({ content: `Has votado para saltar la canción. (${current}/${required} votos necesarios)` });
+          await interaction.editReply({ content: `Has votado para saltar la canción. (${current}/${required} votos necesarios)` });
         }
+        break;
       }
 
-      // -------------------- PAUSE --------------------
+      // ----------------------------- PAUSE
       case 'pause': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue || !queue.playing) return interaction.editReply({ content: 'No hay reproducción activa.' });
-
-        if (!isCreatorOrPermitted(member, voiceChannel.id)) return interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden pausar.' });
-
+        if (!queue || !queue.playing) {
+          await interaction.editReply({ content: 'No hay reproducción activa.' });
+          break;
+        }
+        if (!isCreatorOrPermitted(member, voiceChannel.id)) {
+          await interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden pausar.' });
+          break;
+        }
         queue.setPaused(true);
-        return interaction.editReply({ content: 'Reproducción pausada.' });
+        await interaction.editReply({ content: 'Reproducción pausada.' });
+        break;
       }
 
-      // -------------------- RESUME --------------------
+      // ----------------------------- RESUME
       case 'resume': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue) return interaction.editReply({ content: 'No hay cola activa.' });
-
-        if (!isCreatorOrPermitted(member, voiceChannel.id)) return interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden reanudar.' });
-
+        if (!queue) {
+          await interaction.editReply({ content: 'No hay cola activa.' });
+          break;
+        }
+        if (!isCreatorOrPermitted(member, voiceChannel.id)) {
+          await interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden reanudar.' });
+          break;
+        }
         queue.setPaused(false);
-        return interaction.editReply({ content: 'Reproducción reanudada.' });
+        await interaction.editReply({ content: 'Reproducción reanudada.' });
+        break;
       }
 
-      // -------------------- BUCLE --------------------
+      // ----------------------------- BUCLE
       case 'bucle': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue || !queue.playing) return interaction.editReply({ content: 'No hay reproducción activa.' });
-
-        if (!isCreatorOrPermitted(member, voiceChannel.id)) return interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden activar el bucle.' });
-
+        if (!queue || !queue.playing) {
+          await interaction.editReply({ content: 'No hay reproducción activa.' });
+          break;
+        }
+        if (!isCreatorOrPermitted(member, voiceChannel.id)) {
+          await interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden activar el bucle.' });
+          break;
+        }
         queue.setRepeatMode(QueueRepeatMode.TRACK);
-        return interaction.editReply({ content: 'Bucle activado para la canción actual.' });
+        await interaction.editReply({ content: 'Bucle activado para la canción actual.' });
+        break;
       }
 
-      // -------------------- STOP_BUCLE --------------------
+      // ----------------------------- STOP_BUCLE
       case 'stop_bucle': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue) return interaction.editReply({ content: 'No hay cola activa.' });
-
-        if (!isCreatorOrPermitted(member, voiceChannel.id)) return interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden desactivar el bucle.' });
-
+        if (!queue) {
+          await interaction.editReply({ content: 'No hay cola activa.' });
+          break;
+        }
+        if (!isCreatorOrPermitted(member, voiceChannel.id)) {
+          await interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden desactivar el bucle.' });
+          break;
+        }
         queue.setRepeatMode(QueueRepeatMode.OFF);
-        return interaction.editReply({ content: 'Bucle desactivado.' });
+        await interaction.editReply({ content: 'Bucle desactivado.' });
+        break;
       }
 
-      // -------------------- RANDOM (shuffle) --------------------
+      // ----------------------------- RANDOM (shuffle)
       case 'random': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue || queue.tracks.size === 0) return interaction.editReply({ content: 'No hay canciones en la cola.' });
-
-        if (!isCreatorOrPermitted(member, voiceChannel.id)) return interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden cambiar el modo aleatorio.' });
-
-        // shuffle helper (discord-player tiene shuffle en tracks)
+        if (!queue || queue.tracks.size === 0) {
+          await interaction.editReply({ content: 'No hay canciones en la cola.' });
+          break;
+        }
+        if (!isCreatorOrPermitted(member, voiceChannel.id)) {
+          await interaction.editReply({ content: 'Solo el creador o usuarios con permiso pueden mezclar la cola.' });
+          break;
+        }
         try {
           queue.tracks.shuffle();
-          return interaction.editReply({ content: 'Cola mezclada (random activado).' });
+          await interaction.editReply({ content: 'Cola mezclada (random activado).' });
         } catch (e) {
-          return interaction.editReply({ content: 'No se pudo mezclar la cola.' });
+          await interaction.editReply({ content: 'No se pudo mezclar la cola.' });
         }
+        break;
       }
 
-      // -------------------- ANY --------------------
+      // ----------------------------- ANY
       case 'any': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
-        const queue = player.getQueue(guild.id);
         const vcId = voiceChannel.id;
-
         ensureHistory(vcId);
         const history = channelHistory.get(vcId) || [];
 
-        // Si hay cola actual, elegimos de la cola o history segun disponibilidad
+        const queue = player.getQueue(guild.id);
         const pool = [];
         if (queue && queue.tracks && queue.tracks.size > 0) {
-          // incluir la cola actual (tracks que quedan)
           for (const t of queue.tracks.toArray()) pool.push({ title: t.title, url: t.url });
         }
-        // añadir historial
         for (const h of history) pool.push({ title: h.title, url: h.url });
 
-        if (!pool.length) return interaction.editReply({ content: 'No hay canciones en la playlist ni historial para seleccionar.' });
-
-        const choice = pool[Math.floor(Math.random() * pool.length)];
-
-        // reproducir la elección: añadir a la cola y si no se está reproduciendo, iniciar
-        const mainQueue = player.createQueue(guild, {
-          metadata: { textChannel: interaction.channel, voiceChannel }
-        });
-        if (!mainQueue.connection) {
-          try {
-            await mainQueue.connect(voiceChannel);
-          } catch (err) {
-            mainQueue.destroy();
-            return interaction.editReply({ content: 'No pude conectar al canal de voz.' });
-          }
+        if (!pool.length) {
+          await interaction.editReply({ content: 'No hay canciones en la playlist ni historial para seleccionar.' });
+          break;
         }
 
-        const res = await player.search(choice.url || choice.title, {
-          requestedBy: interaction.user,
-          searchEngine: QueryType.AUTO
-        });
+        const choice = pool[Math.floor(Math.random() * pool.length)];
+        const mainQueue = player.createQueue(guild, { metadata: { textChannel: interaction.channel, voiceChannel } });
+        if (!mainQueue.connection) {
+          try { await mainQueue.connect(voiceChannel); } catch (err) { mainQueue.destroy(); await interaction.editReply({ content: 'No pude conectar al canal de voz.' }); break; }
+        }
 
-        if (!res || !res.tracks.length) return interaction.editReply({ content: 'No pude encontrar la canción seleccionada.' });
+        const res = await player.search(choice.url || choice.title, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
+        if (!res || !res.tracks.length) { await interaction.editReply({ content: 'No pude encontrar la canción seleccionada.' }); break; }
 
         await mainQueue.addTrack(res.tracks[0]);
         if (!mainQueue.playing) await mainQueue.play();
-
-        return interaction.editReply({ content: `Reproduciendo canción aleatoria: **${res.tracks[0].title}**` });
+        await interaction.editReply({ content: `Reproduciendo canción aleatoria: **${res.tracks[0].title}**` });
+        break;
       }
 
-      // -------------------- ADD_PERMISS --------------------
+      // ----------------------------- ADD_PERMISS
       case 'add_permiss': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const usuario = interaction.options.getMember('usuario', true);
         const voiceChannel = member.voice.channel;
         const creator = voiceChannelCreators.get(voiceChannel.id);
-        if (!creator) return interaction.editReply({ content: 'No se ha identificado el creador del canal.' });
-        if (member.id !== creator) return interaction.editReply({ content: 'Solo el creador del canal puede usar este comando.' });
+        if (!creator) { await interaction.editReply({ content: 'No se ha identificado el creador del canal.' }); break; }
+        if (member.id !== creator) { await interaction.editReply({ content: 'Solo el creador del canal puede usar este comando.' }); break; }
 
         ensurePermSet(voiceChannel.id);
         channelPermittedUsers.get(voiceChannel.id).add(usuario.id);
-
-        return interaction.editReply({ content: `${usuario.user.tag} ahora tiene permisos en este canal para controlar la música.` });
+        await interaction.editReply({ content: `${usuario.user.tag} ahora tiene permisos para controlar la música en este canal.` });
+        break;
       }
 
-      // -------------------- CLEAR --------------------
+      // ----------------------------- CLEAR
       case 'clear': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const voiceChannel = member.voice.channel;
         const queue = player.getQueue(guild.id);
-        if (!queue) return interaction.editReply({ content: 'No hay cola activa.' });
-
+        if (!queue) { await interaction.editReply({ content: 'No hay cola activa.' }); break; }
         const creator = voiceChannelCreators.get(voiceChannel.id);
-        if (!creator) return interaction.editReply({ content: 'No se ha identificado el creador del canal.' });
-        if (member.id !== creator) return interaction.editReply({ content: 'Solo el creador del canal puede limpiar la cola.' });
+        if (!creator) { await interaction.editReply({ content: 'No se ha identificado el creador del canal.' }); break; }
+        if (member.id !== creator) { await interaction.editReply({ content: 'Solo el creador del canal puede limpiar la cola.' }); break; }
 
         queue.clear();
-        return interaction.editReply({ content: 'Cola borrada (las canciones siguientes han sido eliminadas).' });
+        await interaction.editReply({ content: 'Cola borrada (las canciones siguientes han sido eliminadas).' });
+        break;
       }
 
-      // -------------------- KARAOKE --------------------
+      // ----------------------------- KARAOKE
       case 'karaoke': {
-        if (!requireVoice()) return;
+        if (!requireVoice()) break;
         const query = interaction.options.getString('query', true);
         const voiceChannel = member.voice.channel;
 
         if (!voiceChannelCreators.has(voiceChannel.id)) voiceChannelCreators.set(voiceChannel.id, member.id);
 
-        const queue = player.createQueue(guild, {
-          metadata: { textChannel: interaction.channel, voiceChannel }
-        });
-
+        const queue = player.createQueue(guild, { metadata: { textChannel: interaction.channel, voiceChannel } });
         if (!queue.connection) {
-          try {
-            await queue.connect(voiceChannel);
-          } catch (err) {
-            queue.destroy();
-            return interaction.editReply({ content: 'No pude conectar al canal de voz.' });
-          }
+          try { await queue.connect(voiceChannel); } catch (err) { queue.destroy(); await interaction.editReply({ content: 'No pude conectar al canal de voz.' }); break; }
         }
 
-        // Buscar versión karaoke/instrumental
         const searchQuery = `${query} karaoke instrumental`;
-        const result = await player.search(searchQuery, {
-          requestedBy: interaction.user,
-          searchEngine: QueryType.YOUTUBE_VIDEO
-        });
-
-        if (!result || !result.tracks.length) {
-          return interaction.editReply({ content: `No encontré versión karaoke para: ${query}` });
-        }
+        const result = await player.search(searchQuery, { requestedBy: interaction.user, searchEngine: QueryType.YOUTUBE_VIDEO });
+        if (!result || !result.tracks.length) { await interaction.editReply({ content: `No encontré versión karaoke para: ${query}` }); break; }
 
         const track = result.tracks[0];
         await queue.addTrack(track);
         if (!queue.playing) await queue.play();
-
-        return interaction.editReply({ content: `Karaoke añadido a la cola: **${track.title}**` });
+        await interaction.editReply({ content: `Karaoke añadido a la cola: **${track.title}**` });
+        break;
       }
 
-      // -------------------- PING --------------------
+      // ----------------------------- PING
       case 'ping': {
-        return interaction.editReply({ content: `Pong! Latencia websocket: ${client.ws.ping}ms` });
+        await interaction.editReply({ content: `Pong! Latencia websocket: ${client.ws.ping}ms` });
+        break;
       }
 
-      // -------------------- HELP --------------------
+      // ----------------------------- HELP
       case 'help': {
         const inVoice = member && member.voice && member.voice.channel;
         const allowedChannel = HELP_CHANNEL_IDS.includes(interaction.channelId);
         if (!inVoice && !allowedChannel) {
-          return interaction.editReply({ content: 'El comando /help solo puede usarse en canales de voz o en los canales permitidos.' });
+          await interaction.editReply({ content: 'El comando /help solo puede usarse en canales de voz o en los canales permitidos.' });
+          break;
         }
 
         const embed = new EmbedBuilder()
@@ -568,7 +561,7 @@ client.on('interactionCreate', async (interaction) => {
           .setDescription('Lista de comandos disponibles y su función (solo tú puedes ver esto).')
           .addFields(
             { name: '/play <nombre|url>', value: 'Reproduce una canción o la añade a la cola.' },
-            { name: '/play_playlist <platform?> <name|url>', value: 'Añade una playlist (URL o búsqueda por plataforma).' },
+            { name: '/play_playlist <name> [platform]', value: 'Añade una playlist (URL o búsqueda por plataforma).' },
             { name: '/skip', value: 'Salta la canción (creador o usuario con permiso).' },
             { name: '/vote_skip', value: 'Votación para saltar la canción (>50% del canal).' },
             { name: '/pause', value: 'Pausa la reproducción.' },
@@ -585,34 +578,34 @@ client.on('interactionCreate', async (interaction) => {
           .setFooter({ text: 'Sirgio Music Bot' })
           .setTimestamp();
 
-        return interaction.editReply({ embeds: [embed], ephemeral: true });
+        await interaction.editReply({ embeds: [embed], ephemeral: true });
+        break;
       }
 
       default:
-        return interaction.editReply({ content: 'Comando no implementado aún.' });
+        await interaction.editReply({ content: 'Comando no implementado.' });
+        break;
     }
   } catch (err) {
     console.error('Error ejecutando comando:', err);
+    // Intentamos informar al usuario (si ya deferimos, usamos editReply)
     try {
-      if (!interaction.replied) {
-        return interaction.reply({ content: 'Ocurrió un error al ejecutar el comando.', ephemeral: true });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: 'Ocurrió un error al ejecutar el comando.' });
       } else {
-        return interaction.editReply({ content: 'Ocurrió un error al ejecutar el comando.' });
+        await interaction.reply({ content: 'Ocurrió un error al ejecutar el comando.', ephemeral: true });
       }
     } catch (e) { /* ignore */ }
   }
 });
 
 /**
- * ========== Limpieza cuando el canal de voz queda vacío ==========
- * Si el canal de voz queda vacío, y la cola no tiene canciones, limpiamos el estado.
+ * LIMPIEZA cuando el canal de voz queda vacío
  */
 client.on('voiceStateUpdate', (oldState, newState) => {
   try {
     if (oldState.channel && oldState.channel.members.filter(m => !m.user.bot).size === 0) {
-      // si no hay humanos en el canal
       const vc = oldState.channel;
-      // obtenemos la cola del guild, si existe y corresponde a ese canal y está vacía -> limpiar
       const q = player.getQueue(oldState.guild.id);
       if (!q) {
         voiceChannelCreators.delete(vc.id);
@@ -620,7 +613,6 @@ client.on('voiceStateUpdate', (oldState, newState) => {
         voteSkips.delete(vc.id);
         channelHistory.delete(vc.id);
       } else {
-        // si la queue existe pero es de ese canal y no tiene tracks
         if (q.voiceChannel && q.voiceChannel.id === vc.id && (!q.tracks || q.tracks.size === 0)) {
           q.destroy();
           voiceChannelCreators.delete(vc.id);
@@ -630,12 +622,12 @@ client.on('voiceStateUpdate', (oldState, newState) => {
         }
       }
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) { console.error('voiceStateUpdate cleanup err', e); }
 });
 
 /**
- * ========== Login ==========
+ * LOGIN
  */
 client.login(TOKEN).catch(err => {
-  console.error('Error al loguear el bot:', err);
+  console.error('Error al iniciar sesión con el token:', err);
 });
