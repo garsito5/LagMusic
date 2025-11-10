@@ -192,38 +192,73 @@ client.on('interactionCreate', async (interaction) => {
 
   try {
     switch (commandName) {
-      // ---------------- PLAY (name or url)
-      case 'play': {
-        if (!requireVoice()) break;
-        const query = interaction.options.getString('query', true);
-        const voiceChannel = member.voice.channel;
+    // ---------------- PLAY (nombre o url con compatibilidad actualizada)
+case 'play': {
+  if (!requireVoice()) break;
+  const query = interaction.options.getString('query', true);
+  const voiceChannel = member.voice.channel;
 
-        // register creator for this voice channel if not exists
-        if (!voiceChannelCreators.has(voiceChannel.id)) voiceChannelCreators.set(voiceChannel.id, member.id);
+  if (!voiceChannelCreators.has(voiceChannel.id))
+    voiceChannelCreators.set(voiceChannel.id, member.id);
 
-        const queue = player.nodes.create(guild, { metadata: { textChannel: interaction.channel, voiceChannel } });
-        if (!queue.connection) {
-          try { await queue.connect(voiceChannel); } catch (err) { queue.destroy(); await interaction.editReply({ content: 'No pude conectar al canal de voz.' }); break; }
-        }
+  const queue = player.nodes.create(guild, {
+    metadata: { textChannel: interaction.channel, voiceChannel },
+  });
 
-        const searchResult = await player.search(query, { requestedBy: interaction.user, searchEngine: QueryType.AUTO });
-        if (!searchResult || !searchResult.tracks.length) {
-          await interaction.editReply({ content: `No se encontró la canción: ${query}` });
-          break;
-        }
+  if (!queue.connection) {
+    try {
+      await queue.connect(voiceChannel);
+    } catch (err) {
+      queue.delete();
+      await interaction.editReply({ content: 'No pude conectar al canal de voz.' });
+      break;
+    }
+  }
 
-        if (searchResult.playlist) {
-          await queue.addTracks(searchResult.playlist.tracks);
-          if (!queue.playing) await queue.play();
-          await interaction.editReply({ content: `Playlist añadida: ${searchResult.playlist.title} — ${searchResult.tracks.length} canciones.` });
-        } else {
-          const track = searchResult.tracks[0];
-          await queue.addTrack(track);
-          if (!queue.playing) await queue.play();
-          await interaction.editReply({ content: `Añadido a la cola: **${track.title}**` });
-        }
-        break;
-      }
+  let searchResult;
+
+  try {
+    // Si es enlace directo, usar play-dl para asegurar compatibilidad
+    if (query.includes('youtube.com') || query.includes('youtu.be')) {
+      const info = await playdl.video_info(query);
+      if (!info || !info.video_details) throw new Error('Video no encontrado');
+      const stream = await playdl.stream_from_info(info, { quality: 2 });
+      searchResult = {
+        tracks: [
+          {
+            title: info.video_details.title,
+            url: info.video_details.url,
+            duration: info.video_details.durationRaw,
+            requestedBy: interaction.user,
+            raw: stream,
+          },
+        ],
+      };
+    } else {
+      // Si no es URL, buscar por nombre
+      searchResult = await player.search(query, {
+        requestedBy: interaction.user,
+        searchEngine: QueryType.YOUTUBE_SEARCH,
+      });
+    }
+  } catch (err) {
+    console.error('Error buscando canción:', err);
+    await interaction.editReply({ content: `❌ Error buscando: ${query}` });
+    break;
+  }
+
+  if (!searchResult || !searchResult.tracks.length) {
+    await interaction.editReply({ content: `No se encontró la canción: ${query}` });
+    break;
+  }
+
+  const track = searchResult.tracks[0];
+  await queue.addTrack(track);
+  if (!queue.playing) await queue.play();
+
+  await interaction.editReply({ content: `🎵 Añadido a la cola: **${track.title}**` });
+  break;
+}
 
       // ---------------- PLAY_PLAYLIST
       case 'play_playlist': {
